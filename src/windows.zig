@@ -459,7 +459,15 @@ pub const ws2_32 = struct {
 // --- High-level wrapper functions ---
 
 pub fn unexpectedWSAError(err: ws2_32.WinsockError) error{Unexpected} {
-    return unexpectedError(@as(Win32Error, @enumFromInt(@intFromEnum(err))));
+    // Winsock error codes are not a subset of Win32Error. Constructing the
+    // Win32 enum blindly traps on common values such as WSAENOTSOCK and
+    // WSAECONNREFUSED, so map only known codes and fail closed otherwise.
+    const code = @intFromEnum(err);
+    const win_err = std.meta.intToEnum(Win32Error, code) catch {
+        std.log.err("unexpected Winsock error: {d}", .{code});
+        return error.Unexpected;
+    };
+    return unexpectedError(win_err);
 }
 
 pub fn QueryPerformanceCounter() u64 {
