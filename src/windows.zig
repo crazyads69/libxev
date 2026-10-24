@@ -463,11 +463,14 @@ pub fn unexpectedWSAError(err: ws2_32.WinsockError) error{Unexpected} {
     // Win32 enum blindly traps on common values such as WSAENOTSOCK and
     // WSAECONNREFUSED, so map only known codes and fail closed otherwise.
     const code = @intFromEnum(err);
-    const win_err = std.enums.fromInt(Win32Error, code) orelse {
-        std.log.err("unexpected Winsock error: {d}", .{code});
-        return error.Unexpected;
-    };
-    return unexpectedError(win_err);
+    // Win32Error is non-exhaustive, so std.enums.fromInt would accept any
+    // integer and formatting an unknown tag would panic. Match the declared
+    // fields explicitly instead.
+    inline for (@typeInfo(Win32Error).@"enum".fields) |field| {
+        if (field.value == code) return unexpectedError(@enumFromInt(code));
+    }
+    std.log.err("unexpected Winsock error: {d}", .{code});
+    return error.Unexpected;
 }
 
 pub fn QueryPerformanceCounter() u64 {
