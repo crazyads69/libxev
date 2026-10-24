@@ -466,7 +466,7 @@ pub fn unexpectedWSAError(err: ws2_32.WinsockError) error{Unexpected} {
     // Win32Error is non-exhaustive, so std.enums.fromInt would accept any
     // integer and formatting an unknown tag would panic. Match the declared
     // fields explicitly instead.
-    inline for (@typeInfo(Win32Error).@"enum".fields) |field| {
+    for (@typeInfo(Win32Error).@"enum".fields) |field| {
         if (field.value == code) return unexpectedError(@enumFromInt(code));
     }
     std.log.err("unexpected Winsock error: {d}", .{code});
