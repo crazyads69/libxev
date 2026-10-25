@@ -253,6 +253,12 @@ pub const Loop = struct {
 
                 const c: *Completion = @ptrFromInt(@as(usize, @intCast(ev.udata)));
 
+                // A level-triggered filter is reported again by every kevent
+                // call until its callback drains it. Skip a completion that is
+                // already queued, and do it before perform() so a second read
+                // or accept cannot consume work and then discard the result.
+                if (c.next != null or self.completions.tail == c) continue;
+
                 // If EV_ERROR is set, then submission failed for this
                 // completion. We get the syscall errorcode from data and
                 // store it.
@@ -2920,6 +2926,68 @@ test "kqueue: cancel after a rearm of a completion reported at submit" {
     try loop.run(.no_wait);
     try testing.expectEqual(@as(usize, 1), state.reads);
     try testing.expectEqual(@as(usize, 0), loop.active);
+}
+
+test "kqueue: a still-readable completion is queued once across submits" {
+    const testing = std.testing;
+
+    var loop = try Loop.init(.{});
+    defer loop.deinit();
+
+    var fds: [2]posix.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+    var other_fds: [2]posix.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), std.c.pipe(&other_fds));
+    defer _ = std.c.close(other_fds[0]);
+    defer _ = std.c.close(other_fds[1]);
+
+    // Two bytes with a one-byte buffer: submit() reads the first, and the
+    // descriptor stays readable, so the next kevent call reports it again
+    // while the completion is still waiting in the completion queue.
+    try testing.expectEqual(@as(isize, 2), std.c.write(fds[1], "ab", 2));
+    try testing.expectEqual(@as(isize, 1), std.c.write(other_fds[1], "x", 1));
+
+    const State = struct {
+        buf: [1]u8 = undefined,
+        seen: [4]u8 = undefined,
+        reads: usize = 0,
+    };
+    var state: State = .{};
+    var c: Completion = .{
+        .op = .{ .read = .{ .fd = fds[0], .buffer = .{ .slice = &state.buf } } },
+        .userdata = &state,
+        .callback = (struct {
+            fn callback(ud: ?*anyopaque, _: *Loop, _: *Completion, r: Result) CallbackAction {
+                const s = @as(*State, @ptrCast(@alignCast(ud.?)));
+                _ = r.read catch return .disarm;
+                s.seen[s.reads] = s.buf[0];
+                s.reads += 1;
+                return if (s.reads < 2) .rearm else .disarm;
+            }
+        }).callback,
+    };
+    var other_buf: [1]u8 = undefined;
+    var other: Completion = .{
+        .op = .{ .read = .{ .fd = other_fds[0], .buffer = .{ .slice = &other_buf } } },
+        .callback = (struct {
+            fn callback(_: ?*anyopaque, _: *Loop, _: *Completion, _: Result) CallbackAction {
+                return .disarm;
+            }
+        }).callback,
+    };
+
+    loop.add(&c);
+    try loop.submit();
+    loop.add(&other);
+    try loop.submit();
+
+    var ticks: usize = 0;
+    while (state.reads < 2 and ticks < 16) : (ticks += 1) try loop.run(.no_wait);
+
+    try testing.expectEqual(@as(usize, 2), state.reads);
+    try testing.expectEqualSlices(u8, "ab", state.seen[0..2]);
 }
 
 test "kqueue: socket accept/cancel cancellation should decrease active count" {
